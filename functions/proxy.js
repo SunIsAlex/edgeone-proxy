@@ -57,7 +57,10 @@ export async function onRequest(context) {
     const TARGET_ORIGIN = ${JSON.stringify(targetUrl.origin)};
 
     function toProxyUrl(url) {
-        if (!url || url.startsWith('javascript:') || url.startsWith('data:') || url.startsWith('#') || url.startsWith('blob:')) return url;
+        if (!url) return url;
+        const blacklist = ['/gen_204', '/log?', 'google-analytics.com', 'googletagmanager.com'];
+        if (blacklist.some(b => url.includes(b))) return url;
+        if (url.startsWith('javascript:') || url.startsWith('data:') || url.startsWith('#') || url.startsWith('blob:')) return url;
         try {
             const abs = new URL(url, TARGET_ORIGIN).href;
             if (abs.startsWith(location.origin)) return abs;
@@ -65,6 +68,7 @@ export async function onRequest(context) {
         } catch(e) { return url; }
     }
 
+    // 拦截 a 标签点击
     document.addEventListener('click', function(e) {
         const a = e.target.closest('a');
         if (a && a.href && !a.href.startsWith(PROXY_BASE)) {
@@ -76,11 +80,49 @@ export async function onRequest(context) {
         }
     }, true);
 
+    // 拦截表单提交（修复 Google 搜索跳转的关键）
+    document.addEventListener('submit', function(e) {
+        const form = e.target;
+        if (!form || !form.action) return;
+        try {
+            const actionUrl = new URL(form.action, TARGET_ORIGIN).href;
+            // 如果表单 action 不是已代理的地址，拦截并重定向
+            if (!form.action.startsWith(location.origin)) {
+                e.preventDefault();
+                const formData = new FormData(form);
+                const params = new URLSearchParams(formData).toString();
+                const separator = actionUrl.includes('?') ? '&' : '?';
+                const finalUrl = PROXY_BASE + encodeURIComponent(actionUrl + separator + params);
+                window.location.href = finalUrl;
+            }
+        } catch(e2) {}
+    }, true);
+
+    // 拦截 history.pushState / replaceState（SPA 路由跳转）
+    const patchHistory = (method) => {
+        const orig = history[method];
+        history[method] = function(state, title, url) {
+            if (url) {
+                try {
+                    const abs = new URL(url, TARGET_ORIGIN).href;
+                    if (!abs.startsWith(location.origin)) {
+                        url = PROXY_BASE + encodeURIComponent(abs);
+                    }
+                } catch(e2) {}
+            }
+            return orig.call(this, state, title, url);
+        };
+    };
+    patchHistory('pushState');
+    patchHistory('replaceState');
+
+    // 拦截 window.location 赋值
     const origAssign = window.location.assign.bind(window.location);
     const origReplace = window.location.replace.bind(window.location);
     window.location.assign = (url) => origAssign(toProxyUrl(url));
     window.location.replace = (url) => origReplace(toProxyUrl(url));
 
+    // 拦截 fetch
     const origFetch = window.fetch;
     window.fetch = function(input, init) {
         if (typeof input === 'string') input = toProxyUrl(input);
@@ -88,9 +130,10 @@ export async function onRequest(context) {
         return origFetch(input, init);
     };
 
+    // 拦截 XMLHttpRequest
     const origOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-        return origOpen.call(this, method, toProxyUrl(url), ...rest);
+        return origOpen.call(this, method, toProxyUrl(String(url)), ...rest);
     };
 })();
 </script>`;
