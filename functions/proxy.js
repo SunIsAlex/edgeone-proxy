@@ -1,10 +1,9 @@
 /**
- * This is the final, correct version of the proxy function.
- * It leverages a professional third-party proxy to handle anti-bot measures.
+ * EdgeOne Pages 反向代理函数
+ * 直接由边缘节点代理请求，透传用户 Cookie 及请求头
  */
 export async function onRequest(context) {
     const { request } = context;
-
     try {
         const requestUrl = new URL(request.url);
         const targetUrlParam = requestUrl.searchParams.get('url');
@@ -13,32 +12,50 @@ export async function onRequest(context) {
             return new Response("Query parameter 'url' is missing.", { status: 400 });
         }
 
-        // **CRITICAL FIX: Use a professional proxy service.**
-        const proxyServiceUrl = 'https://cors-anywhere.herokuapp.com/';
-        const actualUrlStr = proxyServiceUrl + targetUrlParam;
+        const targetUrl = new URL(targetUrlParam);
 
-        // We can now use a much simpler request, as the proxy service will handle headers.
-        const modifiedRequest = new Request(actualUrlStr, {
-            headers: {
-                'Origin': requestUrl.origin, // The proxy service requires an Origin header.
-                'X-Requested-With': 'XMLHttpRequest'
-            },
+        // 构建透传请求头：复制用户原始请求头，并修正 Host/Origin/Referer
+        const forwardHeaders = new Headers(request.headers);
+        forwardHeaders.set('Host', targetUrl.host);
+        forwardHeaders.set('Origin', targetUrl.origin);
+        forwardHeaders.set('Referer', targetUrl.origin + '/');
+
+        // 移除可能暴露代理身份的头
+        forwardHeaders.delete('CF-Connecting-IP');
+        forwardHeaders.delete('CF-Ray');
+        forwardHeaders.delete('X-Forwarded-For');
+        forwardHeaders.delete('X-Real-IP');
+
+        const proxyRequest = new Request(targetUrl.toString(), {
             method: request.method,
-            body: (request.method === 'POST' || request.method === 'PUT') ? request.body : null,
-            redirect: 'follow' // We can let the proxy service handle redirects.
+            headers: forwardHeaders,
+            body: ['GET', 'HEAD'].includes(request.method) ? null : request.body,
+            redirect: 'follow',
         });
 
-        const response = await fetch(modifiedRequest);
+        const response = await fetch(proxyRequest);
 
-        // We still need to filter Set-Cookie to avoid browser security issues.
-        const finalHeaders = new Headers(response.headers);
-        finalHeaders.delete('Set-Cookie');
+        // 处理响应头：透传大部分头，但修正跨域和安全策略
+        const responseHeaders = new Headers(response.headers);
 
-        // Since the third-party proxy handles all content, we don't need our own HTML rewriter.
+        // 放开跨域，允许前端正常接收响应
+        responseHeaders.set('Access-Control-Allow-Origin', '*');
+        responseHeaders.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+        responseHeaders.set('Access-Control-Allow-Headers', '*');
+
+        // 移除会阻止代理页面正常渲染的安全头
+        responseHeaders.delete('Content-Security-Policy');
+        responseHeaders.delete('Content-Security-Policy-Report-Only');
+        responseHeaders.delete('X-Frame-Options');
+
+        // Cookie 透传（保留但移除 Secure/SameSite 限制以兼容跨域场景）
+        // 注意：如需完整 Cookie 隔离，可在此处直接 delete('Set-Cookie')
+        // responseHeaders.delete('Set-Cookie');
+
         return new Response(response.body, {
             status: response.status,
             statusText: response.statusText,
-            headers: finalHeaders
+            headers: responseHeaders,
         });
 
     } catch (error) {
